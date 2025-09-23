@@ -3,3 +3,4 @@
 .venv
 /build
 /cmake-build-debug
+/logs
