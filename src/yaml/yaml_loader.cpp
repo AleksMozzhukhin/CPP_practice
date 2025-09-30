@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -149,8 +150,8 @@ bool load_config_from_yaml(const std::string& path,
         }
         else if (key == "tie") {
             std::string v = to_lower(val);
-            if (v == "none") { cfg.tie_policy = core::GameConfig::TiePolicy::None; info("tie = none"); }
-            else if (v == "random") { cfg.tie_policy = core::GameConfig::TiePolicy::Random; info("tie = random"); }
+            if (v == "none") { cfg.tie_policy = core::TiePolicy::None; info("tie = none"); }
+            else if (v == "random") { cfg.tie_policy = core::TiePolicy::Random; info("tie = random"); }
             else warn("line " + std::to_string(lineno) + ": invalid tie (use none|random)");
         }
         else if (key == "k_mafia_div" || key == "k_mafia_divisor") {
@@ -181,6 +182,27 @@ bool load_config_from_yaml(const std::string& path,
                 cfg.eavesdropper_count = v;
                 info("eavesdropper_count = " + std::to_string(v));
             } else warn("line " + std::to_string(lineno) + ": invalid eavesdropper_count (0 or 1)");
+        }
+        // --- режим движка ---
+        else if (key == "use_coroutines") {
+            bool v{};
+            if (parse_bool(val, v)) {
+                cfg.use_coroutines = v;
+                info(std::string("use_coroutines = ") + (v ? "true" : "false"));
+            } else warn("line " + std::to_string(lineno) + ": invalid use_coroutines (true|false)");
+        }
+        else if (key == "engine") {
+            std::string v = to_lower(val);
+            trim(v);
+            if (v == "coro" || v == "coroutines") {
+                cfg.use_coroutines = true;
+                info("engine = coro");
+            } else if (v == "threads" || v == "thread") {
+                cfg.use_coroutines = false;
+                info("engine = threads");
+            } else {
+                warn("line " + std::to_string(lineno) + ": invalid engine (use coro|threads)");
+            }
         }
         else {
             // неизвестный ключ — просто предупреждение

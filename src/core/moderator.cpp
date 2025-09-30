@@ -3,19 +3,21 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
-#include <string>      // для сборки строк логов
-#include <filesystem>  // файловые пути
-#include <fstream>     // запись файлов
-#include <sstream>     // форматирование строк
+#include <string>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iomanip>
+#include <ranges>
+#include <vector>
+#include <optional>
+#include <mutex>
 
 #include "core/game_state.hpp"
 #include "core/rng.hpp"
 #include "util/logger.hpp"
 #include "roles/i_player.hpp"
-
-// Доп. роли
-#include "roles/executioner.hpp"   // для dynamic_cast и вызова decide_execution
+#include "roles/executioner.hpp" // для dynamic_cast и decide_execution
 
 namespace core {
 
@@ -28,14 +30,14 @@ using roles::Role;
 namespace {
     inline const char* role_ru(Role r) noexcept {
         switch (r) {
-            case Role::Citizen:     return "Мирный житель";
-            case Role::Mafia:       return "Мафия";
-            case Role::Detective:   return "Комиссар";
-            case Role::Doctor:      return "Доктор";
-            case Role::Maniac:      return "Маньяк";
-            case Role::Executioner: return "Палач";
-            case Role::Journalist:  return "Журналист";
-            case Role::Eavesdropper:return "Ушастик";
+            case Role::Citizen:      return "Мирный житель";
+            case Role::Mafia:        return "Мафия";
+            case Role::Detective:    return "Комиссар";
+            case Role::Doctor:       return "Доктор";
+            case Role::Maniac:       return "Маньяк";
+            case Role::Executioner:  return "Палач";
+            case Role::Journalist:   return "Журналист";
+            case Role::Eavesdropper: return "Ушастик";
         }
         return "Неизвестно";
     }
@@ -57,14 +59,43 @@ namespace {
 // -------------------- Moderator --------------------
 
 Moderator::Moderator(const GameConfig& cfg,
-                     smart::shared_like<GameState> state,
-                     util::Logger& root_logger,
-                     Rng& rng)
-    : cfg_(cfg)
-    , state_(std::move(state))
-    , root_(&root_logger)
-    , rng_(&rng)
+                         smart::shared_like<GameState> state,
+                         util::Logger& root_logger,
+                         Rng& rng)
+        : cfg_(cfg)
+        , state_(std::move(state))
+        , root_(&root_logger)
+        , rng_(&rng)
 {
+    // --- Очистка логов от прошлых запусков ---
+    {
+        std::error_code ec;
+        // Создаём каталог (если относительный — остаётся относительным к текущему working dir)
+        std::filesystem::create_directories(cfg_.logs_dir, ec);
+
+        // Чистим только файлы раундов и summary внутри выбранного каталога
+        for (const auto& entry : std::filesystem::directory_iterator(cfg_.logs_dir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+
+            const auto& path = entry.path();
+            const std::string name = path.filename().string();
+            const std::string stem = path.stem().string();
+            const std::string ext  = path.extension().string();
+
+            const bool is_round   = (ext == ".txt" && stem.rfind("round_", 0) == 0);
+            const bool is_summary = (name == "summary.txt");
+
+            if (is_round || is_summary) {
+                std::filesystem::remove(path, ec);
+            }
+        }
+
+        if (root_) root_->info("Logs directory cleaned: " + cfg_.logs_dir);
+
+    }
+    // ------------------------------------------
+
     const auto n = state_->players().size();
 
     // Дневные структуры
@@ -78,7 +109,6 @@ Moderator::Moderator(const GameConfig& cfg,
 
     journalist_queries_.clear();
     eavesdrop_requests_.clear();
-
     // Статистика
     stats_votes_given_day_.assign(n, 0);
     stats_votes_received_day_.assign(n, 0);
@@ -90,7 +120,7 @@ Moderator::Moderator(const GameConfig& cfg,
 
     day_voted_flag_.assign(n, false);
 
-    // раундовый лог
+    // Раундовый лог
     round_index_   = 0;
     round_written_ = false;
     round_log_.clear();
@@ -108,13 +138,13 @@ void Moderator::clear_day_votes() {
         day_voted_flag_.assign(n, false);
 
         // Гарантируем размеры статистик (сохраняя накопленное)
-        if (stats_votes_given_day_.size()      < n) stats_votes_given_day_.resize(n, 0);
-        if (stats_votes_received_day_.size()   < n) stats_votes_received_day_.resize(n, 0);
-        if (stats_mafia_votes_.size()          < n) stats_mafia_votes_.resize(n, 0);
-        if (stats_detective_shots_.size()      < n) stats_detective_shots_.resize(n, 0);
-        if (stats_doctor_heals_.size()         < n) stats_doctor_heals_.resize(n, 0);
-        if (stats_maniac_targets_.size()       < n) stats_maniac_targets_.resize(n, 0);
-        if (stats_died_round_.size()           < n) stats_died_round_.resize(n, 0);
+        if (stats_votes_given_day_.size()    < n) stats_votes_given_day_.resize(n, 0);
+        if (stats_votes_received_day_.size() < n) stats_votes_received_day_.resize(n, 0);
+        if (stats_mafia_votes_.size()        < n) stats_mafia_votes_.resize(n, 0);
+        if (stats_detective_shots_.size()    < n) stats_detective_shots_.resize(n, 0);
+        if (stats_doctor_heals_.size()       < n) stats_doctor_heals_.resize(n, 0);
+        if (stats_maniac_targets_.size()     < n) stats_maniac_targets_.resize(n, 0);
+        if (stats_died_round_.size()         < n) stats_died_round_.resize(n, 0);
 
         // Ночная структура tally мафии на случай изменения n
         if (mafia_vote_counts_.size() != n) mafia_vote_counts_.assign(n, 0);
@@ -139,22 +169,19 @@ void Moderator::submit_day_vote(PlayerId voter, PlayerId target) {
         std::scoped_lock lk(mu_);
         if (day_votes_.size() != n) day_votes_.resize(n);
 
-        // статистика: засчитываем «отдал голос сегодня» только один раз за день
+        // Статистика: «отдал голос сегодня» учитываем один раз за день
         if (voter < day_voted_flag_.size() && !day_voted_flag_[voter]) {
             day_voted_flag_[voter] = true;
-            if (voter < stats_votes_given_day_.size())
-                ++stats_votes_given_day_[voter];
+            if (voter < stats_votes_given_day_.size()) ++stats_votes_given_day_[voter];
         }
 
         day_votes_[voter] = target;
 
-        // файл-лог (раунд): фиксируем каждый (возможно, сменяемый) голос
-        {
-            std::ostringstream os;
-            os << "DAY: vote " << player_tag(*ps[voter], voter)
-               << " -> " << player_tag(*ps[target], target) << "\n";
-            round_append_(os.str());
-        }
+        // Файл-лог: фиксируем каждый (возможно, сменяемый) голос
+        std::ostringstream os;
+        os << "DAY: vote " << player_tag(*ps[voter], voter)
+           << " -> " << player_tag(*ps[target], target) << "\n";
+        round_append_(os.str());
     }
 
     if (is_full_logs_() && root_) {
@@ -225,16 +252,16 @@ std::optional<PlayerId> Moderator::resolve_day_lynch() {
     }
 
     if (leaders.size() > 1) {
-        if (cfg_.tie_policy == GameConfig::TiePolicy::None) {
-            // Попытка разрешить ничью через Палача (Executioner)
+        if (cfg_.tie_policy == TiePolicy::None) {
+            // Попытка разрешить ничью через Палача
             auto ex_victim = resolve_tie_via_executioner_(leaders);
             if (!ex_victim.has_value()) {
                 if (root_) root_->info("Day: tie detected; tie policy = none -> nobody is lynched");
                 round_append_("DAY: tie -> no lynch\n");
                 return std::nullopt;
             }
-            // Палач выбрал жертву
             PlayerId victim = ex_victim.value();
+
             {
                 std::ostringstream os;
                 os << "DAY: executioner-lynch " << player_tag(*ps[victim], victim)
@@ -256,7 +283,7 @@ std::optional<PlayerId> Moderator::resolve_day_lynch() {
             return victim;
         }
 
-        if (cfg_.tie_policy == GameConfig::TiePolicy::Random) {
+        if (cfg_.tie_policy == TiePolicy::Random) {
             auto it = rng_->choose(leaders.begin(), leaders.end());
             PlayerId victim = *it;
             if (root_) root_->info("Day: tie detected; victim chosen randomly");
@@ -277,6 +304,8 @@ std::optional<PlayerId> Moderator::resolve_day_lynch() {
                     root_->info("Day: lynched player #" + std::to_string(victim + 1));
                 }
             }
+
+            // Статистика: раунд смерти
             {
                 std::scoped_lock lk(mu_);
                 if (victim < stats_died_round_.size() && stats_died_round_[victim] == 0) {
@@ -665,33 +694,52 @@ std::vector<PlayerId> Moderator::resolve_night() {
 // ---------- Общие операции ----------
 
 void Moderator::kill_player(PlayerId id) {
-    const auto& ps = state_->players();
+    const auto& ps = state_->players();  // допускаем, что контейнер может быть const
     const auto n = ps.size();
     if (id >= n) return;
     if (!ps[id]) return;
-    if (!ps[id]->is_alive()) return;
 
-    ps[id]->kill();
+    // Получаем const-указатель, проверяем "жив"
+    const roles::IPlayer* pconst = ps[id].get();
+    if (!pconst || !pconst->is_alive()) return;
+
+    // Снимаем const с самого объекта игрока, затем вызываем неконстантный kill()
+    roles::IPlayer* pmut = const_cast<roles::IPlayer*>(pconst);
+    pmut->kill();
 
     if (root_ && !is_open_()) {
-        // В закрытом режиме остаёмся на нейтральной формулировке
         root_->info("Player #" + std::to_string(id + 1) + " has died");
     }
 }
 
+
 Winner Moderator::evaluate_winner() const {
-    const auto maf = alive_mafia_count_();
-    const auto man = alive_maniac_count_();
-    const auto town= alive_town_count_();
+    using std::ranges::count_if;
 
-    // 1) Победа мирных: нет мафии и нет маньяка
-    if (maf == 0 && man == 0) return Winner::Town;
+    const auto& ps = state_->players();
 
-    // 2) Победа маньяка: остались ровно маньяк и один мирный
-    if (man == 1 && town == 1 && maf == 0) return Winner::Maniac;
+    const auto alive = [&](auto const& p) { return p && p->is_alive(); };
 
-    // 3) Победа мафии: паритет/превосходство над остальными
-    if (maf > 0 && maf >= (town + man)) return Winner::Mafia;
+    const auto is_town   = [&](auto const& p){ return alive(p) && p->team() == Team::Town;   };
+    const auto is_mafia  = [&](auto const& p){ return alive(p) && p->team() == Team::Mafia;  };
+    const auto is_maniac = [&](auto const& p){ return alive(p) && p->team() == Team::Maniac; };
+
+    const std::size_t town_alive   = count_if(ps, is_town);
+    const std::size_t mafia_alive  = count_if(ps, is_mafia);
+    const std::size_t maniac_alive = count_if(ps, is_maniac);
+
+    // Условия победы:
+    // 1) Мирные: нет мафии и нет маньяка
+    if (mafia_alive == 0 && maniac_alive == 0 && town_alive > 0)
+        return Winner::Town;
+
+    // 2) Маньяк: точное состояние 1 маньяк, 1 мирный, 0 мафии
+    if (maniac_alive == 1 && mafia_alive == 0 && town_alive == 1)
+        return Winner::Maniac;
+
+    // 3) Мафия: паритет/превосходство над остальными
+    if (mafia_alive > 0 && mafia_alive >= (town_alive + maniac_alive))
+        return Winner::Mafia;
 
     return Winner::None;
 }
@@ -806,15 +854,15 @@ void Moderator::write_summary_file() const {
         const std::string tm   = team_ru(ps[i]->team());
         const bool alive       = ps[i]->is_alive();
 
-        const int died_round   = (i < stats_died_round_.size() ? stats_died_round_[i] : 0);
-        const int vg           = (i < stats_votes_given_day_.size() ? stats_votes_given_day_[i] : 0);
-        const int vr           = (i < stats_votes_received_day_.size() ? stats_votes_received_day_[i] : 0);
-        const int mv           = (i < stats_mafia_votes_.size() ? stats_mafia_votes_[i] : 0);
-        const int ds           = (i < stats_detective_shots_.size() ? stats_detective_shots_[i] : 0);
-        const int dh           = (i < stats_doctor_heals_.size() ? stats_doctor_heals_[i] : 0);
-        const int mt           = (i < stats_maniac_targets_.size() ? stats_maniac_targets_[i] : 0);
+        const int died_round   = (i < stats_died_round_.size()       ? stats_died_round_[i]       : 0);
+        const int vg           = (i < stats_votes_given_day_.size()  ? stats_votes_given_day_[i]  : 0);
+        const int vr           = (i < stats_votes_received_day_.size()? stats_votes_received_day_[i]: 0);
+        const int mv           = (i < stats_mafia_votes_.size()      ? stats_mafia_votes_[i]      : 0);
+        const int ds           = (i < stats_detective_shots_.size()  ? stats_detective_shots_[i]  : 0);
+        const int dh           = (i < stats_doctor_heals_.size()     ? stats_doctor_heals_[i]     : 0);
+        const int mt           = (i < stats_maniac_targets_.size()   ? stats_maniac_targets_[i]   : 0);
 
-        ofs << std::setw(2) << (i + 1) << " "
+        ofs << std::setw(2)  << (i + 1) << " "
             << pad(nm, 15) << " "
             << pad(rl, 16) << " "
             << pad(tm, 9)  << " "
@@ -894,43 +942,60 @@ void Moderator::clear_night_intents_() {
 }
 
 // --- разрешение дневной ничьей через Палача ---
-std::optional<PlayerId> Moderator::resolve_tie_via_executioner_(const std::vector<PlayerId>& leaders) {
+std::optional<PlayerId>
+Moderator::resolve_tie_via_executioner_(const std::vector<PlayerId>& leaders) {
+    if (leaders.empty()) return std::nullopt;
+
+    // Контейнер может быть константным — получаем const*, затем снимаем const
     const auto& ps = state_->players();
-    // Переберём всех живых Палачей
+
+    // Перебираем всех живых Палачей
     for (std::size_t i = 0; i < ps.size(); ++i) {
         if (!ps[i] || !ps[i]->is_alive()) continue;
         if (ps[i]->role() != Role::Executioner) continue;
 
-        // безопасный dynamic_cast
-        auto* ex = dynamic_cast<roles::Executioner*>(ps[i].get());
-        if (!ex) continue;
+        const roles::IPlayer* pconst = ps[i].get();
+        if (!pconst) continue;
 
+        // Executioner::decide_execution(...) не const → нужен неконстантный указатель
+        roles::IPlayer* pmut = const_cast<roles::IPlayer*>(pconst);
+        auto* ex = dynamic_cast<roles::Executioner*>(pmut);
+        if (!ex) {
+            // роль заявлена как Executioner, но приведение не удалось (на всякий случай)
+            continue;
+        }
+
+        // Запрос решения у Палача
         auto decision = ex->decide_execution(*this, leaders);
+
         if (!decision.has_value()) {
-            // Лог в файл: воздержался
+            // Палач воздержался — зафиксируем в раундовом логе и ищем дальше
             std::ostringstream os;
             os << "DAY: executioner abstains (" << player_tag(*ps[i], i) << ")\n";
             round_append_(os.str());
-            // ищем дальше другого палача (если есть)
             continue;
         }
 
         PlayerId victim = decision.value();
-        // проверим, что выбранный — действительно из лидеров
+
+        // Проверяем, что выбор входит в множество лидеров
         if (std::find(leaders.begin(), leaders.end(), victim) == leaders.end()) {
-            // выбор некорректен — игнорируем
             std::ostringstream os;
             os << "DAY: executioner invalid choice by " << player_tag(*ps[i], i) << "\n";
             round_append_(os.str());
             continue;
         }
 
-        // зафиксируем выбор
-        std::ostringstream os;
-        os << "DAY: executioner chooses " << player_tag(*ps[victim], victim) << "\n";
-        round_append_(os.str());
+        // Легитимный выбор — фиксируем и возвращаем
+        {
+            std::ostringstream os;
+            os << "DAY: executioner chooses " << player_tag(*ps[victim], victim) << "\n";
+            round_append_(os.str());
+        }
         return victim;
     }
+
+    // Ни один Палач не принял решение
     return std::nullopt;
 }
 

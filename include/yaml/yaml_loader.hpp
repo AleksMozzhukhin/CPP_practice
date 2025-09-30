@@ -26,6 +26,10 @@ namespace yaml {
      *   journalist_count:     0|1                # Журналист
      *   eavesdropper_count:   0|1                # Ушастик
      *
+     *   # Режим движка:
+     *   use_coroutines:       bool               # true => корутинный движок
+     *   engine:               coro|threads       # синоним: engine: coro -> use_coroutines=true
+     *
      * Формат файла — «ключ: значение», комментарии начинаются с '#'.
      * Пробелы вокруг ':' допустимы. Пустые строки и комментарии игнорируются.
      *

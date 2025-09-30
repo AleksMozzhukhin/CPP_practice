@@ -1,58 +1,57 @@
 #pragma once
-#include <random>
-#include <type_traits>
-#include <algorithm>
-#include <iterator>
 #include <cstdint>
+#include <random>
+#include <iterator>
+#include <algorithm>
+#include <type_traits>
+
+#include "concepts/mafia_concepts.hpp"
 
 namespace core {
 
+    /**
+     * Лёгкая обёртка над std::mt19937_64 с удобными методами:
+     *  - uniform_int(a, b)              — равномерное целое в [a; b]
+     *  - choose(first, last)            — случайный элемент из диапазона итераторов
+     *  - shuffle(first, last)           — тасование диапазона (Fisher–Yates / std::shuffle)
+     *
+     * Потокобезопасность: НЕ потокобезопасен. Для параллельных потоков используйте
+     * отдельный экземпляр Rng на поток/игрока.
+     */
     class Rng {
     public:
-        using engine_t = std::mt19937_64;
+        Rng() noexcept;
+        explicit Rng(std::uint64_t seed) noexcept;
 
-        // Конструкторы реализованы в src/core/rng.cpp
-        Rng();
-        explicit Rng(std::uint64_t seed);
+        /// Равномерное целое из закрытого диапазона [a; b].
+        int uniform_int(int a, int b) noexcept;
 
-        // Фактически использованный сид (для повторяемости экспериментов)
-        std::uint64_t seed() const noexcept { return seed_snapshot_; }
-
-        // Равномерное целое [lo, hi]
-        template <class Int>
-        Int uniform_int(Int lo, Int hi) {
-            static_assert(std::is_integral_v<Int>, "Rng::uniform_int requires integral type");
-            if (lo > hi) std::swap(lo, hi);
-            std::uniform_int_distribution<Int> dist(lo, hi);
-            return dist(eng_);
+        /// Выбрать случайный итератор из [first; last). Требует ForwardIterator.
+        template <std::forward_iterator It>
+        It choose(It first, It last) noexcept {
+            const auto n = std::distance(first, last);
+            if (n <= 0) return last;
+            const int idx = uniform_int(0, static_cast<int>(n - 1));
+            std::advance(first, idx);
+            return first;
         }
 
-        // Равномерное вещественное [0, 1)
-        double uniform_01() {
-            std::uniform_real_distribution<double> dist(0.0, 1.0);
-            return dist(eng_);
-        }
-
-        // Перемешивание диапазона
-        template <class It>
-        void shuffle(It first, It last) {
+        /// Перетасовать диапазон [first; last). Требует RandomAccessIterator (для std::shuffle).
+        template <std::random_access_iterator It>
+        void shuffle(It first, It last) noexcept {
             std::shuffle(first, last, eng_);
         }
 
-        // Выбор случайного элемента из RandomAccess-диапазона
-        template <class RAIt>
-        RAIt choose(RAIt first, RAIt last) {
-            auto n = static_cast<std::ptrdiff_t>(std::distance(first, last));
-            if (n <= 0) return last;
-            auto idx = uniform_int<std::ptrdiff_t>(0, n - 1);
-            return first + idx;
-        }
-
     private:
-        engine_t eng_;
-        std::uint64_t seed_snapshot_{0};
+        std::mt19937_64 eng_;
+        std::uint64_t   seed_snapshot_{0};
 
-        static std::uint64_t seed_from_device_(); // реализовано в rng.cpp
+        static std::uint64_t seed_from_device_() noexcept;
     };
+
+
+    // Гарантируем на этапе компиляции, что core::Rng удовлетворяет контракту UniformRng.
+    static_assert(concepts_mafia::UniformRng<Rng>,
+                  "core::Rng must satisfy UniformRng concept (uniform_int/choose/shuffle)");
 
 } // namespace core

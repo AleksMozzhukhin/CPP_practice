@@ -10,16 +10,20 @@
 #include "roles/i_player.hpp"
 #include "core/types.hpp"
 #include "core/moderator.hpp"
-#include "core/game_state.hpp" // нужна полная декларация для state_->players()
+#include "core/game_state.hpp"    // нужна полная декларация для state_->players()
+#include "util/gstate_views.hpp" // генераторы alive_ids/alive_except (корутины)
 
 namespace roles {
 
 /**
  * Human — интерактивный игрок.
- * Поддерживаемые роли: все базовые + доп. роли из ТЗ (Палач, Журналист, Ушастик).
+ * Поддерживаемые роли: все базовые + доп. роли (Палач, Журналист, Ушастик).
  *
  * Внимание: Палач не совершает ночных действий — его особое действие
  * вызывается ведущим при ничьей днём через decide_execution(...).
+ *
+ * В этом варианте для построения списков кандидатов используются корутины
+ * (см. util::views::alive_ids и alive_except).
  */
 class Human final : public BasePlayer {
 public:
@@ -33,7 +37,7 @@ public:
 
     // День: вывод подсказок (минимальных) и обычное голосование
     void on_day(core::Moderator& /*mod*/) override {
-        // оставим без подробных подсказок, чтобы не засорять вывод
+        // без дополнительных подсказок, чтобы не шуметь в вывод
     }
 
     core::PlayerId vote_day(core::Moderator& /*mod*/) override {
@@ -67,8 +71,7 @@ public:
             }
 
             case Role::Detective: {
-                // Простая стратегия: либо проверить, либо выстрелить. Для соответствия ТЗ
-                // здесь только выстрел (проверка в текущей симуляции не раскрывается игроку).
+                // Для соответствия текущей модели — только выстрел.
                 auto cands = alive_except_self_();
                 if (cands.empty()) break;
                 std::cout << "\n[HUMAN] Ночь (Комиссар). Выберите мишень для выстрела (или 0 — никого):\n";
@@ -158,20 +161,16 @@ public:
         print_candidates_(leaders, /*with_zero_skip=*/true);
 
         auto choice = prompt_pick_optional_(leaders);
-        return choice; // nullptr => воздержался, иначе — кого казнить
+        return choice; // nullopt => воздержался, иначе — кого казнить
     }
 
 private:
-    // ----- утилиты выбора -----
+    // ----- построение списков кандидатов через корутины -----
 
     std::vector<core::PlayerId> alive_except_self_() const {
         std::vector<core::PlayerId> out;
-        const auto& ps = state_->players();
-        out.reserve(ps.size());
-        for (std::size_t i = 0; i < ps.size(); ++i) {
-            if (!ps[i] || !ps[i]->is_alive()) continue;
-            const auto pid = static_cast<core::PlayerId>(i);
-            if (pid == id_) continue;
+        // наполняем из генератора (ленивый перебор живых кроме self)
+        for (auto pid : util::views::alive_except(*state_, id_)) {
             out.push_back(pid);
         }
         return out;
@@ -179,11 +178,8 @@ private:
 
     std::vector<core::PlayerId> alive_including_self_() const {
         std::vector<core::PlayerId> out;
-        const auto& ps = state_->players();
-        out.reserve(ps.size());
-        for (std::size_t i = 0; i < ps.size(); ++i) {
-            if (!ps[i] || !ps[i]->is_alive()) continue;
-            out.push_back(static_cast<core::PlayerId>(i));
+        for (auto pid : util::views::alive_ids(*state_)) {
+            out.push_back(pid);
         }
         return out;
     }

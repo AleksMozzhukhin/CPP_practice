@@ -331,7 +331,7 @@ void GameEngine::player_thread_loop_(std::size_t idx) {
 
         // Дневное действие и голосование
         {
-            const auto& players = state_->players();
+            auto& players = state_->players_mut();
             auto& self = players[idx];
             if (self && self->is_alive()) {
                 self->on_day(*moderator_);
@@ -349,7 +349,7 @@ void GameEngine::player_thread_loop_(std::size_t idx) {
         if (stop_.load(std::memory_order_acquire)) break;
 
         {
-            const auto& players = state_->players();
+            auto& players = state_->players_mut();
             auto& self = players[idx];
             if (self && self->is_alive()) {
                 self->on_night(*moderator_);
