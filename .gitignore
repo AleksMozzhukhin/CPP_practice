@@ -1,6 +1,7 @@
 .idea
 .env
 .venv
-/build
-/cmake-build-debug
-/logs
+*/build
+*/cmake-build-debug
+*/logs
+*/data

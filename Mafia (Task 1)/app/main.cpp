@@ -202,7 +202,6 @@ int main(int argc, char** argv) {
     // Блокирующий stdin в интерактивном режиме несовместим с кооперативным коро-планировщиком —
     // откатываемся на потоковый движок.
     if (cfg.use_coroutines && cfg.human) {
-        root.warn("Human player + coroutine engine is unsupported (blocking stdin); falling back to threads");
         cfg.use_coroutines = false;
     }
 
@@ -226,7 +225,6 @@ int main(int argc, char** argv) {
     root.info("effective: n_players = " + std::to_string(cfg.n_players));
     root.info("effective: seed = " + std::to_string(cfg.seed));
     root.info("effective: logs_dir = " + cfg.logs_dir);
-    root.info(std::string("effective: engine = ") + (cfg.use_coroutines ? "coro" : "threads"));
     root.info("mafia-sim: initializing");
 
     // ─────────────────────────────────────────────────────────────────────────────
